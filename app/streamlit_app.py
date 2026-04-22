@@ -20,6 +20,7 @@ from ingestion.chunking import split_documents
 from ingestion.embedding import get_embedding_function
 from ingestion.vector_store import store_in_chromadb, collection_exists, delete_collection, list_collections
 from app.config import COLLECTION_NAME, LLM_PROVIDER, GROQ_MODEL, GEMINI_MODEL
+from llm.gemini_model import generate_answer
 
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -52,8 +53,6 @@ def _init_state():
         "active_collection" : COLLECTION_NAME,
         "ingested_hash"     : None,    # hash of last ingested file
         "ingestion_done"    : False,   # guard against Streamlit reruns
-        "hitl_pending"      : False,
-        "hitl_context"      : {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -161,68 +160,89 @@ with st.sidebar:
 
 
 # ── Main chat area ────────────────────────────────────────────────────────────
-st.title("🤖 RAG Customer Support Assistant")
+st.title("🖥️ IT Internal Support Assistant (with HITL)")
 st.caption("Powered by ChromaDB · LangGraph · Gemini Embeddings")
 
+
 # Render message history
-for msg in st.session_state.messages:
+for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-        if msg.get("meta"):
-            meta = msg["meta"]
-            conf_cls = "confidence-high" if meta["confident"] else "confidence-low"
-            conf_label = "High" if meta["confident"] else "Low"
-
-            hitl_badge = (
-                '<span class="hitl-badge">HITL Triggered</span>'
-                if meta["hitl"] else ""
-            )
-
-            st.markdown(
-                f'<div class="meta-box">'
-                f'Confidence: <span class="{conf_cls}">{conf_label}</span> '
-                f'(avg score: {meta["score"]:.4f}) {hitl_badge}'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-            with st.expander("🔍 Retrieved Chunks"):
-                for i, chunk in enumerate(meta.get("chunks", [])):
-                    st.text(f"[{i+1}] {chunk[:300]}...")
-
-
-# ── HITL override input ───────────────────────────────────────────────────────
-if st.session_state.hitl_pending:
-    st.warning("⚠️ Low confidence detected. You can override the AI answer below.")
-    with st.form("hitl_form"):
-        override_text = st.text_area(
-            "Human override answer (leave blank to keep AI answer):",
-            height=100,
-        )
-        submitted = st.form_submit_button("Submit Override")
-        if submitted:
-            ctx = st.session_state.hitl_context
-            final_answer = override_text.strip() or ctx["ai_answer"]
-
-            st.session_state.messages.append({
-                "role"   : "assistant",
-                "content": final_answer,
-                "meta"   : {**ctx["meta"], "hitl": True},
-            })
-            st.session_state.hitl_pending = False
-            st.session_state.hitl_context = {}
-            st.rerun()
-
+        if msg["role"] == "user":
+            st.markdown(msg["content"])
+        else:
+            if msg.get("hitl_needed"):
+                st.warning("⚠️ AI is unsure about THIS answer")
+                st.markdown(f"**Reason:** Low retrieval confidence (score: {msg.get('confidence', 0.0):.4f})")
+                st.markdown(f"**AI Best Attempt:** {msg['content']}")
+                
+                st.markdown(f"👉 **Help improve answer for:** *{msg.get('query', 'your question')}*")
+                
+                q_lower = msg.get("query", "").lower()
+                suggestions = []
+                if "compare" in q_lower:
+                    suggestions = ["Compare using available data", "Highlight differences clearly"]
+                elif "explain" in q_lower:
+                    suggestions = ["Explain in simple terms", "Give detailed explanation"]
+                elif "what" in q_lower or "list" in q_lower:
+                    suggestions = ["List all relevant points", "Provide structured answer"]
+                else:
+                    suggestions = ["Use general knowledge", "Answer step-by-step"]
+                
+                cols = st.columns(len(suggestions))
+                for i, sugg in enumerate(suggestions):
+                    if cols[i].button(sugg, key=f"btn_sugg_{idx}_{i}"):
+                        st.session_state[f"hitl_inst_{idx}"] = sugg
+                
+                inst = st.text_area("Instruction", key=f"hitl_inst_{idx}", label_visibility="collapsed", placeholder="Type your instruction here...")
+                
+                if st.button("Regenerate Answer", key=f"btn_regen_{idx}"):
+                    if inst.strip():
+                        with st.spinner("Regenerating..."):
+                            new_answer = generate_answer(
+                                query=msg["query"],
+                                context=msg.get("chunks", []),
+                                instruction=inst.strip()
+                            )
+                        # Update the message in place
+                        msg["content"] = new_answer
+                        msg["hitl_needed"] = False
+                        msg["instruction"] = inst.strip()
+                        msg["is_confident"] = True  # Mark as confident after human override
+                        st.rerun()
+            else:
+                st.markdown(msg["content"])
+                
+                # Support both old meta format and new flat format
+                is_confident = msg.get("is_confident") if "is_confident" in msg else msg.get("meta", {}).get("confident", True)
+                confidence = msg.get("confidence") if "confidence" in msg else msg.get("meta", {}).get("score", 0.0)
+                instruction = msg.get("instruction") if "instruction" in msg else msg.get("meta", {}).get("hitl", False)
+                chunks = msg.get("chunks") if "chunks" in msg else msg.get("meta", {}).get("chunks", [])
+                
+                conf_cls = "confidence-high" if is_confident else "confidence-low"
+                conf_label = "High" if is_confident else "Low"
+                hitl_badge = '<span class="hitl-badge">HITL Triggered</span>' if instruction else ""
+                
+                st.markdown(
+                    f'<div class="meta-box">'
+                    f'Confidence: <span class="{conf_cls}">{conf_label}</span> '
+                    f'(avg score: {confidence:.4f}) {hitl_badge}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                
+                with st.expander("🔍 Retrieved Chunks"):
+                    for i, chunk in enumerate(chunks):
+                        st.text(f"[{i+1}] {chunk[:300]}...")
 
 # ── Chat input ────────────────────────────────────────────────────────────────
-if prompt := st.chat_input("Ask a question about your document..."):
+if prompt := st.chat_input("Ask a question about HR, Leave policies, or IT issues..."):
     if not st.session_state.active_collection:
         st.error("Please upload a PDF first.")
         st.stop()
 
     # Show user message immediately
     st.session_state.messages.append({"role": "user", "content": prompt})
+    
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -240,35 +260,16 @@ if prompt := st.chat_input("Ask a question about your document..."):
         avg_score    = sum(scores) / len(scores) if scores else 0.0
         contexts     = result.get("context", [])
 
-        meta = {
-            "confident": is_confident,
-            "hitl"     : hitl_needed,
-            "score"    : avg_score,
-            "chunks"   : contexts,
+        assistant_msg = {
+            "role": "assistant",
+            "content": answer,
+            "query": prompt,
+            "confidence": avg_score,
+            "hitl_needed": hitl_needed,
+            "instruction": "",
+            "chunks": contexts,
+            "is_confident": is_confident
         }
-
-        if hitl_needed:
-            # Don't append to history yet — wait for human override
-            st.session_state.hitl_pending = True
-            st.session_state.hitl_context = {
-                "ai_answer": answer,
-                "meta"     : meta,
-            }
-            st.warning(f"⚠️ Low confidence (score: {avg_score:.4f}). Scroll up to override.")
-            st.markdown(f"**AI Best Attempt:** {answer}")
-        else:
-            st.markdown(answer)
-            conf_cls   = "confidence-high" if is_confident else "confidence-low"
-            conf_label = "High" if is_confident else "Low"
-            st.markdown(
-                f'<div class="meta-box">Confidence: '
-                f'<span class="{conf_cls}">{conf_label}</span> '
-                f'(avg score: {avg_score:.4f})</div>',
-                unsafe_allow_html=True,
-            )
-
-            st.session_state.messages.append({
-                "role"   : "assistant",
-                "content": answer,
-                "meta"   : meta,
-            })
+        
+        st.session_state.messages.append(assistant_msg)
+        st.rerun()

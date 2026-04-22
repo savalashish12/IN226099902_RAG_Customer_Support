@@ -17,12 +17,12 @@ from app.config import (
 from llm.prompt_template import build_prompt
 
 
-def generate_answer(query: str, context: List[str]) -> str:
+def generate_answer(query: str, context: List[str], instruction: str = "") -> str:
     """
     Generate a grounded answer using the configured LLM provider.
     Supports: 'gemini' or 'groq'
     """
-    prompt = build_prompt(query, context)
+    prompt = build_prompt(query, context, instruction)
 
     if LLM_PROVIDER == "groq":
         return _call_groq(prompt)

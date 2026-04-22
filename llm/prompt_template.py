@@ -9,16 +9,14 @@ Design:
 
 from typing import List
 
-SYSTEM_INSTRUCTION = (
-    "You are a customer support assistant.\n\n"
-    "Answer using ONLY the provided context.\n"
-    "If partial information exists, explain clearly based on what is available.\n"
-    "If the answer is truly not present in the context, say exactly:\n"
-    "\"I don't have enough information.\""
-)
-
-
-def build_prompt(query: str, context: List[str]) -> str:
+def build_prompt(query: str, context: List[str], instruction: str = "") -> str:
+    system_instruction = (
+        "Answer ONLY from the provided context.\n"
+        "If the answer is not present, say:\n"
+        "'I could not find this in the provided documents.'\n"
+        "Do NOT use external knowledge."
+    )
+    
     if not context:
         context_block = "[No context retrieved]"
     else:
@@ -28,9 +26,14 @@ def build_prompt(query: str, context: List[str]) -> str:
             for i, chunk in enumerate(context)
         )
 
-    return (
-        f"{SYSTEM_INSTRUCTION}\n\n"
+    prompt = (
+        f"{system_instruction}\n\n"
         f"Context:\n{context_block}\n\n"
-        f"Question:\n{query.strip()}\n\n"
-        f"Answer:"
+        f"Question:\n{query.strip()}\n"
     )
+    
+    if instruction:
+        prompt += f"\nInstruction:\n{instruction.strip()}\n"
+        
+    prompt += "\nAnswer:"
+    return prompt

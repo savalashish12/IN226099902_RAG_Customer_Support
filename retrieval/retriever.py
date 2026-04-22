@@ -37,16 +37,28 @@ def retrieve_context_with_scores(
 ) -> List[Tuple[str, float, dict]]:
     """
     Returns list of (text, score, metadata) tuples.
-    Lower L2 score = more relevant.
+    Uses MMR search for diversity. Converts L2 distance to Similarity Score.
     """
     if not query.strip():
         raise ValueError("Query cannot be empty.")
 
-    vs      = _get_vectorstore(collection_name)
-    results = vs.similarity_search_with_score(query, k=top_k)
+    vs = _get_vectorstore(collection_name)
+    
+    # 1. Use MMR search to ensure diversity
+    mmr_docs = vs.max_marginal_relevance_search(query, k=top_k, fetch_k=20)
+    
+    # 2. Fetch scores using standard search to map to MMR docs
+    # Chroma returns L2 distances by default
+    all_results = vs.similarity_search_with_score(query, k=20)
+    score_map = {}
+    for doc, distance in all_results:
+        # Convert L2 distance to Similarity Score (higher is better)
+        similarity = 1.0 - (distance / 2.0)
+        score_map[doc.page_content] = similarity
 
     output = []
-    for doc, score in results:
-        output.append((doc.page_content, round(score, 4), doc.metadata))
+    for doc in mmr_docs:
+        sim = score_map.get(doc.page_content, 0.0)
+        output.append((doc.page_content, round(sim, 4), doc.metadata))
 
     return output

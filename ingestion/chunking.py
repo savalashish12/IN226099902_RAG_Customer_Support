@@ -16,7 +16,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from app.config import CHUNK_SIZE, CHUNK_OVERLAP, MAX_CHUNKS
+from app.config import CHUNK_SIZE, CHUNK_OVERLAP
 
 
 # Patterns that indicate noisy / low-value content (TOC lines, page markers)
@@ -65,11 +65,6 @@ def split_documents(documents: List[Document]) -> List[Document]:
     )
 
     chunks = splitter.split_documents(documents)
-
-    # Cap to avoid excessive embedding API calls
-    if len(chunks) > MAX_CHUNKS:
-        print(f"  [chunking] Capping {len(chunks)} → {MAX_CHUNKS} chunks")
-        chunks = chunks[:MAX_CHUNKS]
 
     print(f"  [chunking] Pages: {len(documents)} | Chunks: {len(chunks)} | size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP}")
     return chunks

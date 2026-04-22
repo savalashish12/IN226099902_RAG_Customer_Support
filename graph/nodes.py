@@ -29,8 +29,8 @@ def retrieval_node(state: RAGState) -> dict:
     scores   = [score for _,    score,  _ in results]
 
     print(f"[retrieval] Got {len(context)} chunks | Scores: {[round(s,3) for s in scores]}")
-    for i, c in enumerate(context):
-        print(f"  [{i+1}] score={scores[i]:.4f} | {c[:80]}...")
+    for i, (c, s) in enumerate(zip(context, scores)):
+        print(f"  [{i+1}] score={s:.4f} | {c[:100].replace(chr(10), ' ')}...")
 
     return {"context": context, "scores": scores}
 
@@ -40,9 +40,18 @@ def retrieval_node(state: RAGState) -> dict:
 def generation_node(state: RAGState) -> dict:
     query   = state["query"]
     context = state["context"]
+    instruction = state.get("hitl_instruction", "")
+    scores  = state.get("scores", [])
 
     print(f"\n[generation] Generating answer...")
-    answer = generate_answer(query, context)
+    
+    avg_score = sum(scores) / len(scores) if scores else 0.0
+    if avg_score < 0.5:
+        print(f"[generation] No-Answer Guard triggered! avg_score={avg_score:.4f} < 0.5")
+        answer = "I could not find this in the provided documents."
+    else:
+        answer = generate_answer(query, context, instruction)
+        
     print(f"[generation] Answer: {answer[:120]}...")
 
     return {"answer": answer}
@@ -58,7 +67,7 @@ def evaluation_node(state: RAGState) -> dict:
         return {"is_confident": False, "hitl_needed": True}
 
     avg_score    = sum(scores) / len(scores)
-    is_confident = avg_score < SIMILARITY_THRESHOLD
+    is_confident = avg_score > SIMILARITY_THRESHOLD
 
     print(
         f"\n[evaluation] avg={avg_score:.4f} | threshold={SIMILARITY_THRESHOLD} "

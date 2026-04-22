@@ -28,10 +28,10 @@ CHROMA_DB_PATH: str   = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 COLLECTION_NAME: str  = "rag_default"
 
 # --- Chunking ---
-CHUNK_SIZE: int    = int(os.getenv("CHUNK_SIZE", "900"))
-CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "100"))
-MAX_CHUNKS: int    = int(os.getenv("MAX_CHUNKS", "60"))
+CHUNK_SIZE: int    = int(os.getenv("CHUNK_SIZE", "400"))
+CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "80"))
+
 
 # --- Retrieval ---
 TOP_K: int                    = int(os.getenv("TOP_K", "5"))
-SIMILARITY_THRESHOLD: float   = float(os.getenv("SIMILARITY_THRESHOLD", "0.4"))
+SIMILARITY_THRESHOLD: float   = float(os.getenv("SIMILARITY_THRESHOLD", "0.6"))
