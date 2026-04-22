@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.env
+chroma_db/
+data/
+*.sqlite3
+*.bin
+submission/
+RAG_Project_Complete.docs
+test/
