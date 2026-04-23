@@ -1,293 +1,376 @@
 """
-streamlit_app.py — RAG Customer Support Assistant UI
-Run: streamlit run app/streamlit_app.py
+streamlit_app.py — Enterprise RAG Customer Support Assistant UI
+
+Features:
+  ✅ PDF upload with MD5 dedup (no re-embedding same file)
+  ✅ Multi-collection switching (HR / IT / Customer Support)
+  ✅ Real-time confidence meter (High/Medium/Low with similarity %)
+  ✅ Retrieved chunks expander (transparency)
+  ✅ HITL panel: Approve or Override AI answer
+  ✅ HITL uses real LangGraph interrupt() + Command(resume=...)
+  ✅ Escalation history log in sidebar
+  ✅ Chat history within session
 """
-
-import os
-import sys
-import hashlib
-import tempfile
-
 import streamlit as st
-from dotenv import load_dotenv
+import uuid
+import hashlib
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-load_dotenv()
-
-from graph.workflow import run_rag_pipeline
-from ingestion.load_pdf import load_pdfs
-from ingestion.chunking import split_documents
-from ingestion.embedding import get_embedding_function
-from ingestion.vector_store import store_in_chromadb, collection_exists, delete_collection, list_collections
-from app.config import COLLECTION_NAME, LLM_PROVIDER, GROQ_MODEL, GEMINI_MODEL
-from llm.gemini_model import generate_answer
-
-
-# ── Page config ───────────────────────────────────────────────────────────────
+# ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="RAG Support Assistant",
-    page_icon="🤖",
+    page_title="TechNova Support Assistant",
+    page_icon="🏢",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.markdown("""
-<style>
-    .main { background-color: #0f1117; }
-    .stChatMessage { border-radius: 12px; padding: 8px; }
-    .confidence-high { color: #22c55e; font-weight: 600; }
-    .confidence-medium { color: #eab308; font-weight: 600; }
-    .confidence-low  { color: #f97316; font-weight: 600; }
-    .hitl-badge { background: #7c3aed; color: white; padding: 2px 8px;
-                  border-radius: 8px; font-size: 0.75rem; }
-    .meta-box { background: #1e2130; border-radius: 8px; padding: 10px;
-                font-size: 0.8rem; color: #94a3b8; margin-top: 6px; }
-    div[data-testid="stSidebar"] { background-color: #161b27; }
-</style>
-""", unsafe_allow_html=True)
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from ingestion.load_pdf import load_and_ingest_pdf
+from ingestion.vector_store import (
+    list_collections, delete_collection, collection_exists
+)
+from graph.workflow import run_rag_pipeline, resume_with_human_input, get_graph_state
+from hitl.manager import hitl_manager
 
-# ── Session state defaults ────────────────────────────────────────────────────
-def _init_state():
+# ─────────────────────────────────────────────────────────────────────────────
+# SESSION STATE INIT
+# ─────────────────────────────────────────────────────────────────────────────
+def init_session():
     defaults = {
-        "messages"          : [],
-        "active_collection" : COLLECTION_NAME,
-        "ingested_hash"     : None,    # hash of last ingested file
-        "ingestion_done"    : False,   # guard against Streamlit reruns
+        "active_collection" : None,
+        "collection_label"  : None,
+        "chat_history"      : [],       # list of {role, content, meta}
+        "pending_hitl"      : None,     # {thread_id, query, ai_answer, ...}
+        "session_id"        : str(uuid.uuid4()),
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
-_init_state()
+init_session()
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _file_hash(data: bytes) -> str:
-    return hashlib.md5(data).hexdigest()[:12]
-
-
-def _ingest_pdf(file_bytes: bytes, file_name: str) -> str:
-    """Run ingestion pipeline. Returns collection_name."""
-    fhash           = _file_hash(file_bytes)
-    collection_name = f"doc_{fhash}"
-
-    # ── KEY FIX: skip if already ingested this exact file ────────────────────
-    if collection_exists(collection_name):
-        st.sidebar.success(f"✅ Already ingested — reusing collection `{collection_name}`")
-        return collection_name
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file_bytes)
-        tmp_path = tmp.name
-
-    try:
-        with st.sidebar:
-            with st.status("Processing document...", expanded=True) as status:
-                st.write("📄 Loading pages...")
-                docs   = load_pdfs(file_path=tmp_path)
-
-                st.write("✂️ Chunking & cleaning...")
-                chunks = split_documents(docs)
-
-                st.write("🔢 Embedding & storing...")
-                emb_fn = get_embedding_function()
-                store_in_chromadb(chunks, emb_fn, collection_name=collection_name)
-
-                status.update(label="✅ Ingestion complete!", state="complete")
-    finally:
-        os.remove(tmp_path)
-
-    return collection_name
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER FUNCTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+def get_confidence_ui(confidence: str, similarity_pct: float) -> tuple[str, str]:
+    """Returns (badge_html, color_hex) for confidence display."""
+    if confidence == "HIGH":
+        badge = f"🟢 High Confidence &nbsp;|&nbsp; {similarity_pct:.0f}% Match"
+        color = "#1a7a4a"
+    elif confidence == "MEDIUM":
+        badge = f"🟡 Medium Confidence &nbsp;|&nbsp; {similarity_pct:.0f}% Match"
+        color = "#b8860b"
+    else:
+        badge = f"🔴 Low Confidence &nbsp;|&nbsp; {similarity_pct:.0f}% Match — Escalated to Human"
+        color = "#c0392b"
+    return badge, color
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+def get_file_md5(file_bytes: bytes) -> str:
+    return hashlib.md5(file_bytes).hexdigest()[:16]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("📚 Knowledge Base")
-    active_model = GROQ_MODEL if LLM_PROVIDER == "groq" else GEMINI_MODEL
-    st.caption(f"Provider: **{LLM_PROVIDER.upper()}** · Model: `{active_model}`")
-    st.divider()
+    st.markdown("## 🏢 TechNova Support")
+    st.markdown("---")
 
-    # ── Upload ────────────────────────────────────────────────────────────────
-    uploaded = st.file_uploader("Upload PDF", type="pdf", key="pdf_uploader")
+    # ── PDF Upload ────────────────────────────────────────────
+    st.markdown("### 📚 Knowledge Base")
+    st.caption("Upload a company PDF to begin")
+
+    uploaded = st.file_uploader(
+        "Upload PDF", type=["pdf"], label_visibility="collapsed"
+    )
 
     if uploaded:
-        file_bytes = uploaded.getvalue()
-        file_hash  = _file_hash(file_bytes)
+        file_bytes = uploaded.read()
+        md5        = get_file_md5(file_bytes)
+        col_name   = f"doc_{md5}"
 
-        # Only run ingestion once per unique file per session
-        if st.session_state.ingested_hash != file_hash:
-            col_name = _ingest_pdf(file_bytes, uploaded.name)
-            st.session_state.active_collection = col_name
-            st.session_state.ingested_hash     = file_hash
-            st.session_state.ingestion_done    = True
-            st.session_state.messages          = [
-                {"role": "assistant", "content": f"📄 **{uploaded.name}** ingested! Ask me anything about it."}
-            ]
+        if not collection_exists(col_name):
+            with st.spinner(f"📄 Ingesting {uploaded.name}..."):
+                try:
+                    count = load_and_ingest_pdf(file_bytes, col_name, uploaded.name)
+                    st.success(f"✅ Ingested {count} chunks")
+                except Exception as e:
+                    st.error(f"❌ Ingestion failed: {e}")
         else:
-            st.sidebar.info(f"Using collection: `{st.session_state.active_collection}`")
+            st.info(f"♻️ Using cached: {uploaded.name}")
 
-    st.divider()
+        st.session_state["active_collection"] = col_name
+        st.session_state["collection_label"]  = uploaded.name
 
-    # ── Collection selector ───────────────────────────────────────────────────
-    st.subheader("🗂 Active Collections")
+    # ── Collection Switcher ────────────────────────────────────
+    st.markdown("### 🗂️ Collections")
     collections = list_collections()
+
     if collections:
-        chosen = st.selectbox(
-            "Switch collection:",
-            options=collections,
-            index=collections.index(st.session_state.active_collection)
-                  if st.session_state.active_collection in collections else 0,
-            key="collection_selector",
-        )
-        if chosen != st.session_state.active_collection:
-            st.session_state.active_collection = chosen
-            st.session_state.messages          = []
-            st.rerun()
-
-        # Delete button
-        if st.button("🗑 Delete selected collection", use_container_width=True):
-            delete_collection(chosen)
-            remaining = [c for c in collections if c != chosen]
-            st.session_state.active_collection = remaining[0] if remaining else COLLECTION_NAME
-            st.session_state.messages          = []
-            st.rerun()
+        for col in collections:
+            is_active = col == st.session_state.get("active_collection")
+            btn_label = f"{'▶ ' if is_active else ''}{col}"
+            
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                if st.button(btn_label, key=f"col_{col}", use_container_width=True):
+                    st.session_state["active_collection"] = col
+                    st.session_state["collection_label"]  = col
+                    st.rerun()
+            with c2:
+                if st.button("🗑️", key=f"del_{col}", help="Delete this collection"):
+                    delete_collection(col)
+                    if is_active:
+                        st.session_state["active_collection"] = None
+                        st.session_state["collection_label"] = None
+                    st.rerun()
     else:
-        st.info("No collections yet. Upload a PDF to start.")
+        st.caption("No collections yet. Upload a PDF.")
 
-    st.divider()
-    st.caption(f"Active: `{st.session_state.active_collection}`")
+    st.markdown("---")
+
+    # ── HITL History ──────────────────────────────────────────
+    st.markdown("### 📋 Escalation Log")
+    history = hitl_manager.get_history()
+    if history:
+        for h in reversed(history[-5:]):
+            status_icon = {"PENDING": "⏳", "APPROVED": "✅", "OVERRIDDEN": "✏️"}.get(h["status"], "❓")
+            with st.expander(f"{status_icon} {h['query'][:40]}..."):
+                st.caption(f"Status: **{h['status']}**")
+                st.caption(f"Reason: {h['reason']}")
+                st.caption(f"Created: {h['created_at'][:19]}")
+    else:
+        st.caption("No escalations yet.")
 
 
-# ── Main chat area ────────────────────────────────────────────────────────────
-st.title("🖥️ IT Internal Support Assistant (with HITL)")
-st.caption("Powered by ChromaDB · LangGraph · Gemini Embeddings")
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN AREA
+# ─────────────────────────────────────────────────────────────────────────────
+active_col   = st.session_state.get("active_collection")
+active_label = st.session_state.get("collection_label", active_col or "")
 
+st.markdown(f"# 🖥️ TechNova Internal Support Assistant")
+st.markdown(
+    f"**Active KB:** `{active_label or 'None — upload a PDF to begin'}`"
+    f"&nbsp;&nbsp;|&nbsp;&nbsp;"
+    f"**LLM:** Groq · llama-3.3-70b-versatile"
+    f"&nbsp;&nbsp;|&nbsp;&nbsp;"
+    f"**Vector DB:** ChromaDB"
+)
+st.markdown("---")
 
-# Render message history
-for idx, msg in enumerate(st.session_state.messages):
+with st.expander("🤔 How does this work? (Simple Explanation)"):
+    st.markdown("""
+    **Hi! I am your AI Assistant. Here's how to use me:**
+    1. 📄 **Upload a PDF:** Click the upload button on the left to give me a document to read.
+    2. 💬 **Ask a Question:** Type your question in the chat box at the bottom.
+    3. 🤖 **I Search the Document:** I will read through the PDF you gave me to find the exact answer.
+    4. 🚦 **Confidence Check:** 
+       - 🟢 **High Match:** I am sure about the answer!
+       - 🟡 **Medium Match:** I found some information, but it might not be perfect.
+       - 🔴 **Low Match:** I couldn't find the answer, so I will ask a human to review it!
+    """)
+
+# ── Chat History ──────────────────────────────────────────────────────────────
+for msg in st.session_state["chat_history"]:
     with st.chat_message(msg["role"]):
-        if msg["role"] == "user":
-            st.markdown(msg["content"])
-        else:
-            if msg.get("hitl_needed"):
-                st.warning("⚠️ AI is unsure about this answer.")
-                st.markdown(f"**Reason:** {msg.get('hitl_reason', 'Low confidence answer')}")
-                st.markdown("**Help improve it:**")
-                st.markdown(f"**Retrieval score:** `{msg.get('confidence', 0.0):.4f}`")
-                st.markdown(f"**AI Best Attempt:** {msg['content']}")
-                
-                st.markdown(f"👉 **What should AI focus on?** *(for: '{msg.get('query', 'your question')}')* ")
-                
-                q_lower = msg.get("query", "").lower()
-                suggestions = []
-                if "compare" in q_lower:
-                    suggestions = ["Compare clearly with differences"]
-                elif "explain" in q_lower:
-                    suggestions = ["Explain step-by-step"]
-                elif "process" in q_lower:
-                    suggestions = ["Give structured steps"]
-                else:
-                    suggestions = ["Answer step-by-step", "Provide structured summary"]
-                
-                cols = st.columns(len(suggestions))
-                for i, sugg in enumerate(suggestions):
-                    if cols[i].button(sugg, key=f"btn_sugg_{idx}_{i}"):
-                        st.session_state[f"hitl_inst_{idx}"] = sugg
-                
-                inst = st.text_area("Instruction", key=f"hitl_inst_{idx}", label_visibility="collapsed", placeholder="Type your instruction here...")
-                
-                if st.button("Regenerate Answer", key=f"btn_regen_{idx}"):
-                    if inst.strip():
-                        with st.spinner("Regenerating..."):
-                            new_answer = generate_answer(
-                                query=msg["query"],
-                                context=msg.get("chunks", []),
-                                instruction=inst.strip()
-                            )
-                        # Update the message in place
-                        msg["content"] = new_answer
-                        msg["hitl_needed"] = False
-                        msg["instruction"] = inst.strip()
-                        msg["is_confident"] = True  # Mark as confident after human override
-                        st.rerun()
-            else:
-                st.markdown(msg["content"])
-                
-                # Support both old meta format and new flat format
-                is_confident = msg.get("is_confident") if "is_confident" in msg else msg.get("meta", {}).get("confident", True)
-                confidence = msg.get("confidence") if "confidence" in msg else msg.get("meta", {}).get("score", 0.0)
-                instruction = msg.get("instruction") if "instruction" in msg else msg.get("meta", {}).get("hitl", False)
-                chunks = msg.get("chunks") if "chunks" in msg else msg.get("meta", {}).get("chunks", [])
-                
-                conf_level = msg.get("confidence_level")
-                if conf_level:
-                    if conf_level == "HIGH":
-                        conf_cls = "confidence-high"
-                        conf_label = "High (relevant match)"
-                    elif conf_level == "MEDIUM":
-                        conf_cls = "confidence-medium"
-                        conf_label = "Medium (partial match)"
-                    else:
-                        conf_cls = "confidence-low"
-                        conf_label = "Low (weak or no match)"
-                else:
-                    conf_cls = "confidence-high" if is_confident else "confidence-low"
-                    conf_label = "High" if is_confident else "Low"
-                    
-                hitl_badge = '<span class="hitl-badge">HITL Triggered</span>' if instruction else ""
-                
-                st.markdown(
-                    f'<div class="meta-box">'
-                    f'Confidence: <span class="{conf_cls}">{conf_label}</span> '
-                    f'(avg score: {confidence:.4f}) {hitl_badge}'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-                
-                with st.expander("🔍 Retrieved Chunks"):
-                    for i, chunk in enumerate(chunks):
-                        st.text(f"[{i+1}] {chunk[:300]}...")
+        st.markdown(msg["content"])
 
-# ── Chat input ────────────────────────────────────────────────────────────────
-if prompt := st.chat_input("Ask a question about HR, Leave policies, or IT issues..."):
-    if not st.session_state.active_collection:
-        st.error("Please upload a PDF first.")
-        st.stop()
+        # Show metadata for assistant messages
+        if msg["role"] == "assistant" and "meta" in msg:
+            meta = msg["meta"]
+            confidence = meta.get("confidence_level", "LOW")
+            similarity = meta.get("similarity_pct", 0.0)
+            badge, color = get_confidence_ui(confidence, similarity)
 
-    # Show user message immediately
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            result = run_rag_pipeline(
-                query           = prompt,
-                collection_name = st.session_state.active_collection,
+            st.markdown(
+                f'<span style="color:{color}; font-size:0.85em; font-weight:600">'
+                f'{badge}</span>',
+                unsafe_allow_html=True
             )
 
-        answer       = result.get("answer", "No answer generated.")
-        is_confident = result.get("is_confident", False)
-        hitl_needed  = result.get("hitl_needed", False)
-        scores       = result.get("scores", [])
-        avg_score    = sum(scores) / len(scores) if scores else 0.0
-        contexts     = result.get("context", [])
+            # Retrieved chunks expander
+            if meta.get("context"):
+                with st.expander(f"🔍 {len(meta['context'])} Retrieved Chunks", expanded=False):
+                    for i, chunk in enumerate(meta["context"]):
+                        score = meta["scores"][i] if i < len(meta.get("scores", [])) else "—"
+                        sim   = round((1 - score) * 100, 1) if isinstance(score, float) else "—"
+                        st.markdown(f"**Chunk {i+1}** — L2 Score: `{score}` | Similarity: `{sim}%`")
+                        st.text(chunk[:300] + "..." if len(chunk) > 300 else chunk)
+                        st.divider()
 
-        assistant_msg = {
-            "role": "assistant",
-            "content": answer,
-            "query": prompt,
-            "confidence": avg_score,
-            "hitl_needed": hitl_needed,
-            "hitl_reason": result.get("hitl_reason", "Low confidence answer"),
-            "instruction": "",
-            "chunks": contexts,
-            "is_confident": is_confident,
-            "confidence_level": result.get("confidence_level", "LOW")
-        }
-        
-        st.session_state.messages.append(assistant_msg)
-        st.rerun()
+
+# ── HITL Panel ────────────────────────────────────────────────────────────────
+pending = st.session_state.get("pending_hitl")
+
+if pending:
+    with st.container():
+        st.markdown("---")
+        st.markdown(
+            "### 🚨 Human Review Required",
+            help="The AI could not answer this with high confidence. Please review."
+        )
+
+        col_l, col_r = st.columns([2, 1])
+
+        with col_l:
+            st.error(f"**Escalation Reason:** {pending.get('reason', 'Low confidence')}")
+            st.markdown(f"**User Query:** {pending['query']}")
+            st.markdown("**AI-Generated Answer:**")
+            st.info(pending["ai_answer"])
+
+        with col_r:
+            st.markdown("**Your Decision:**")
+            override_text = st.text_area(
+                "Override answer (leave blank to approve AI answer):",
+                height=150,
+                placeholder="Type a better answer here, or leave blank to approve...",
+                key="hitl_override_text"
+            )
+
+            c1, c2 = st.columns(2)
+
+            with c1:
+                if st.button("✅ Approve AI Answer", use_container_width=True, type="secondary"):
+                    result = resume_with_human_input(
+                        thread_id       = pending["thread_id"],
+                        approved_answer = pending["ai_answer"],
+                        overridden      = False,
+                    )
+                    hitl_manager.resolve(pending["thread_id"], pending["ai_answer"], False)
+
+                    # Add resolved answer to chat
+                    st.session_state["chat_history"].append({
+                        "role": "assistant",
+                        "content": f"✅ **[Human Approved]**\n\n{pending['ai_answer']}",
+                        "meta": pending.get("meta", {})
+                    })
+                    st.session_state["pending_hitl"] = None
+                    st.rerun()
+
+            with c2:
+                if st.button("✏️ Submit Override", use_container_width=True, type="primary"):
+                    final_answer = override_text.strip() or pending["ai_answer"]
+                    overridden   = bool(override_text.strip())
+
+                    result = resume_with_human_input(
+                        thread_id       = pending["thread_id"],
+                        approved_answer = final_answer,
+                        overridden      = overridden,
+                    )
+                    hitl_manager.resolve(pending["thread_id"], final_answer, overridden)
+
+                    label = "Human Overridden" if overridden else "Human Approved"
+                    st.session_state["chat_history"].append({
+                        "role": "assistant",
+                        "content": f"{'✏️' if overridden else '✅'} **[{label}]**\n\n{final_answer}",
+                        "meta": pending.get("meta", {})
+                    })
+                    st.session_state["pending_hitl"] = None
+                    st.rerun()
+
+        st.markdown("---")
+
+
+# ── Chat Input ────────────────────────────────────────────────────────────────
+if not active_col:
+    st.warning("⬅️ Please upload a PDF from the sidebar to start.")
+else:
+    user_input = st.chat_input("Ask a question about your company policy or IT issues...")
+
+    if user_input:
+        # Don't process new queries while HITL is pending
+        if pending:
+            st.warning("⚠️ Please resolve the pending human review before asking a new question.")
+        else:
+            # Show user message
+            st.session_state["chat_history"].append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            # Run RAG pipeline
+            thread_id = f"thread_{st.session_state['session_id']}_{uuid.uuid4().hex[:8]}"
+
+            with st.chat_message("assistant"):
+                with st.spinner("🔍 Searching knowledge base..."):
+                    try:
+                        result = run_rag_pipeline(
+                            query           = user_input,
+                            collection_name = active_col,
+                            thread_id       = thread_id,
+                        )
+
+                        answer           = result.get("answer", "No answer generated.")
+                        confidence_level = result.get("confidence_level", "LOW")
+                        similarity_pct   = result.get("similarity_pct", 0.0)
+                        hitl_needed      = result.get("hitl_needed", False)
+                        context          = result.get("context", [])
+                        scores           = result.get("scores", [])
+                        hitl_reason      = result.get("hitl_reason", "")
+
+                        badge, color = get_confidence_ui(confidence_level, similarity_pct)
+
+                        if hitl_needed:
+                            # Store pending HITL — do NOT show answer yet
+                            hitl_session_id = hitl_manager.create_session(
+                                query      = user_input,
+                                ai_answer  = answer,
+                                confidence = confidence_level,
+                                reason     = hitl_reason,
+                            )
+                            st.session_state["pending_hitl"] = {
+                                "thread_id" : thread_id,
+                                "query"     : user_input,
+                                "ai_answer" : answer,
+                                "reason"    : hitl_reason,
+                                "confidence": confidence_level,
+                                "meta"      : {
+                                    "confidence_level": confidence_level,
+                                    "similarity_pct"  : similarity_pct,
+                                    "context"         : context,
+                                    "scores"          : scores,
+                                }
+                            }
+                            st.warning(
+                                f"🚨 This query has been escalated for human review.\n\n"
+                                f"**Reason:** {hitl_reason}"
+                            )
+                        else:
+                            # Show answer directly
+                            st.markdown(answer)
+                            st.markdown(
+                                f'<span style="color:{color}; font-size:0.85em; font-weight:600">'
+                                f'{badge}</span>',
+                                unsafe_allow_html=True
+                            )
+
+                            # Retrieved chunks
+                            if context:
+                                with st.expander(f"🔍 {len(context)} Retrieved Chunks", expanded=False):
+                                    for i, chunk in enumerate(context):
+                                        score = scores[i] if i < len(scores) else None
+                                        sim   = round((1 - score) * 100, 1) if score is not None else "—"
+                                        st.markdown(f"**Chunk {i+1}** | L2 Score: `{round(score,4) if score else '—'}` | Similarity: `{sim}%`")
+                                        st.text(chunk[:300] + "..." if len(chunk) > 300 else chunk)
+                                        st.divider()
+
+                            # Save to history
+                            st.session_state["chat_history"].append({
+                                "role"   : "assistant",
+                                "content": answer,
+                                "meta"   : {
+                                    "confidence_level": confidence_level,
+                                    "similarity_pct"  : similarity_pct,
+                                    "context"         : context,
+                                    "scores"          : scores,
+                                }
+                            })
+
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error(f"❌ Pipeline error: {e}")
+                        st.exception(e)

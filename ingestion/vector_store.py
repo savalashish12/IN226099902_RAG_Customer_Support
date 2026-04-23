@@ -1,73 +1,54 @@
 """
-vector_store.py — Persistent ChromaDB with per-session collections.
+vector_store.py — ChromaDB CRUD operations.
 """
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import os
-import sys
-from typing import List
-
-from langchain_core.documents import Document
 from langchain_chroma import Chroma
-
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from app.config import CHROMA_DB_PATH
+from ingestion.embedding import get_embedding_function
 
 
-def store_in_chromadb(
-    chunks: List[Document],
-    embedding_fn,
-    collection_name: str,
-) -> Chroma:
-    """Embed and store chunks in a named ChromaDB collection."""
-    print(f"  [vector_store] Storing {len(chunks)} chunks → collection='{collection_name}'")
-
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embedding_fn,
-        collection_name=collection_name,
-        persist_directory=CHROMA_DB_PATH,
+def _get_store(collection_name: str) -> Chroma:
+    return Chroma(
+        collection_name   = collection_name,
+        embedding_function= get_embedding_function(),
+        persist_directory = CHROMA_DB_PATH,
     )
 
-    print(f"  [vector_store] ✅ Done — {len(chunks)} chunks stored.")
-    return vectorstore
+
+def store_chunks(chunks: list, collection_name: str) -> int:
+    """Embed and store chunks. Returns number stored."""
+    store = _get_store(collection_name)
+    texts = [c.page_content for c in chunks]
+    metas = [c.metadata     for c in chunks]
+    ids   = [f"{collection_name}_chunk_{i}" for i in range(len(texts))]
+    store.add_texts(texts=texts, metadatas=metas, ids=ids)
+    return len(texts)
 
 
 def collection_exists(collection_name: str) -> bool:
-    """Check if a named collection already exists in ChromaDB."""
+    """Check if a collection already has chunks (dedup guard)."""
     try:
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        existing = [c.name for c in client.list_collections()]
-        return collection_name in existing
+        store = _get_store(collection_name)
+        return store._collection.count() > 0
     except Exception:
         return False
 
 
-def delete_collection(collection_name: str) -> None:
-    """Delete a named collection from ChromaDB."""
+def list_collections() -> list[str]:
+    """List all persisted ChromaDB collections."""
+    import chromadb
+    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    return [c.name for c in client.list_collections()]
+
+
+def delete_collection(collection_name: str) -> bool:
+    """Delete a ChromaDB collection."""
     try:
         import chromadb
         client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
         client.delete_collection(collection_name)
-        print(f"  [vector_store] 🗑 Deleted collection: {collection_name}")
-    except Exception as e:
-        print(f"  [vector_store] Warning: Could not delete '{collection_name}': {e}")
-
-
-def list_collections() -> List[str]:
-    """Return names of all collections in the persistent ChromaDB."""
-    try:
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        return [c.name for c in client.list_collections()]
+        return True
     except Exception:
-        return []
-
-
-def load_vectorstore(embedding_fn, collection_name: str) -> Chroma:
-    """Load an existing collection for retrieval."""
-    return Chroma(
-        collection_name=collection_name,
-        embedding_function=embedding_fn,
-        persist_directory=CHROMA_DB_PATH,
-    )
+        return False

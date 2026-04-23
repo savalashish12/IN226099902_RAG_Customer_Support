@@ -1,39 +1,33 @@
 """
-prompt_template.py — Builds the grounded answer prompt.
-
-Design:
-  - Allows partial answers when context is incomplete
-  - Clean numbered chunk format
-  - Hard fallback only if truly no information exists
+prompt_template.py — Builds structured prompts for the LLM.
 """
 
-from typing import List
 
-def build_prompt(query: str, context: List[str], instruction: str = "") -> str:
-    system_instruction = (
-        "Answer ONLY from the provided context.\n"
-        "If the answer is not present, say:\n"
-        "'I could not find this in the provided documents.'\n"
-        "Do NOT use external knowledge."
-    )
+def build_prompt(query: str, context: list[str], instruction: str = "") -> str:
+    """
+    Build a RAG prompt that strictly grounds the LLM in retrieved context.
     
-    if not context:
-        context_block = "[No context retrieved]"
-    else:
-        # Number each chunk and limit length to keep prompt tight
-        context_block = "\n".join(
-            f"[{i+1}] {chunk[:600].strip()}"
-            for i, chunk in enumerate(context)
-        )
+    The prompt uses XML-style tags to clearly delimit context and question,
+    which improves LLM accuracy and reduces hallucination.
+    """
+    context_text = "\n\n---\n\n".join(
+        f"[Chunk {i+1}]\n{chunk}" for i, chunk in enumerate(context)
+    )
 
-    prompt = (
-        f"{system_instruction}\n\n"
-        f"Context:\n{context_block}\n\n"
-        f"Question:\n{query.strip()}\n"
-    )
-    
+    instruction_block = ""
     if instruction:
-        prompt += f"\nInstruction:\n{instruction.strip()}\n"
-        
-    prompt += "\nAnswer:"
-    return prompt
+        instruction_block = f"\n\n<human_instruction>\n{instruction}\n</human_instruction>"
+
+    return f"""You are answering a question for an enterprise support system.
+Use ONLY the information in the context below to answer.
+Do NOT use any external knowledge.
+
+<context>
+{context_text}
+</context>{instruction_block}
+
+<question>
+{query}
+</question>
+
+Provide a clear, structured answer. If the context contains step-by-step instructions, present them as numbered steps. Be professional and concise."""
