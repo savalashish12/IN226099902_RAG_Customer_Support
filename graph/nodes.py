@@ -45,38 +45,78 @@ def generation_node(state: RAGState) -> dict:
 
     print(f"\n[generation] Generating answer...")
     
-    avg_score = sum(scores) / len(scores) if scores else 0.0
-    if avg_score < 0.5:
-        print(f"[generation] No-Answer Guard triggered! avg_score={avg_score:.4f} < 0.5")
-        answer = "I could not find this in the provided documents."
-    else:
-        answer = generate_answer(query, context, instruction)
+    avg_score = sum(scores) / len(scores) if scores else 1.0
+    if avg_score > 0.55:
+        print(f"[generation] No-Answer Guard triggered! avg_score={avg_score:.4f} > 0.55")
+        return {
+            "answer": "I could not find this in the provided documents.",
+            "confidence_level": "LOW",
+            "hitl_needed": True
+        }
+    
+    answer = generate_answer(query, context, instruction)
         
     print(f"[generation] Answer: {answer[:120]}...")
 
     return {"answer": answer}
 
 
+def should_trigger_hitl(query: str, answer: str, avg_score: float, confidence: str):
+    if confidence == "LOW":
+        return True, "Low confidence answer"
+        
+    if confidence == "MEDIUM" and len(query.split()) > 8:
+        return True, "Complex query needs clarification"
+        
+    if any(x in answer.lower() for x in [
+        "could not find", "don't know", "not enough information"
+    ]):
+        return True, "AI uncertainty"
+        
+    keywords = ["urgent", "issue", "problem", "error", "failed", "not working"]
+    if any(word in query.lower() for word in keywords):
+        return True, "User escalation detected"
+        
+    return False, "Confident response"
+
+
 # ── Node 3: Evaluation ────────────────────────────────────────────────────────
 
 def evaluation_node(state: RAGState) -> dict:
     scores = state.get("scores", [])
+    query = state.get("query", "")
+    answer = state.get("answer", "")
 
-    if not scores:
-        print("[evaluation] No scores — triggering HITL.")
-        return {"is_confident": False, "hitl_needed": True}
+    # Default to 1.0 (worst distance) if no scores
+    avg_score = sum(scores) / len(scores) if scores else 1.0
 
-    avg_score    = sum(scores) / len(scores)
-    is_confident = avg_score > SIMILARITY_THRESHOLD
+    # 1. Confidence Mapping — lower L2 distance = better match
+    if avg_score < 0.35:
+        confidence_level = "HIGH"
+    elif avg_score < 0.55:
+        confidence_level = "MEDIUM"
+    else:
+        confidence_level = "LOW"
+
+    # 2. Override: no-answer response always → LOW
+    if "I could not find this in the provided documents." in answer:
+        confidence_level = "LOW"
+
+    # 3. Hybrid HITL Logic
+    hitl_needed, hitl_reason = should_trigger_hitl(query, answer, avg_score, confidence_level)
+
+    is_confident = confidence_level in ("HIGH", "MEDIUM")
 
     print(
-        f"\n[evaluation] avg={avg_score:.4f} | threshold={SIMILARITY_THRESHOLD} "
-        f"| confident={is_confident}"
+        f"\n[evaluation] avg={avg_score:.4f} | confidence={confidence_level} "
+        f"| hitl={hitl_needed} | reason={hitl_reason}"
     )
 
     return {
         "is_confident": is_confident,
-        "hitl_needed" : not is_confident,
+        "hitl_needed" : hitl_needed,
+        "confidence_level": confidence_level,
+        "hitl_reason": hitl_reason
     }
 
 

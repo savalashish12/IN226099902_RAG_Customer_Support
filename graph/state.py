@@ -16,3 +16,5 @@ class RAGState(TypedDict):
     hitl_needed    : bool
     hitl_answer    : str             # human override (empty if not used)
     hitl_instruction: str            # human instruction for regeneration
+    confidence_level: str
+    hitl_reason     : str

@@ -13,11 +13,11 @@ from graph.nodes import retrieval_node, generation_node, evaluation_node, hitl_n
 
 
 def _router(state: RAGState) -> str:
-    if state["is_confident"]:
-        print("[router] Confident → END")
-        return "end"
-    print("[router] Low confidence → HITL")
-    return "hitl"
+    if state.get("hitl_needed", False):
+        print("[router] Low confidence → HITL")
+        return "hitl"
+    print("[router] Confident → END")
+    return "end"
 
 
 def build_graph():
@@ -56,5 +56,7 @@ def run_rag_pipeline(query: str, collection_name: str) -> dict:
         "is_confident"   : False,
         "hitl_needed"    : False,
         "hitl_answer"    : "",
+        "hitl_instruction": "",
+        "confidence_level": "LOW",
     }
     return _graph.invoke(initial)

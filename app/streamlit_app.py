@@ -36,6 +36,7 @@ st.markdown("""
     .main { background-color: #0f1117; }
     .stChatMessage { border-radius: 12px; padding: 8px; }
     .confidence-high { color: #22c55e; font-weight: 600; }
+    .confidence-medium { color: #eab308; font-weight: 600; }
     .confidence-low  { color: #f97316; font-weight: 600; }
     .hitl-badge { background: #7c3aed; color: white; padding: 2px 8px;
                   border-radius: 8px; font-size: 0.75rem; }
@@ -171,22 +172,24 @@ for idx, msg in enumerate(st.session_state.messages):
             st.markdown(msg["content"])
         else:
             if msg.get("hitl_needed"):
-                st.warning("⚠️ AI is unsure about THIS answer")
-                st.markdown(f"**Reason:** Low retrieval confidence (score: {msg.get('confidence', 0.0):.4f})")
+                st.warning("⚠️ AI is unsure about this answer.")
+                st.markdown(f"**Reason:** {msg.get('hitl_reason', 'Low confidence answer')}")
+                st.markdown("**Help improve it:**")
+                st.markdown(f"**Retrieval score:** `{msg.get('confidence', 0.0):.4f}`")
                 st.markdown(f"**AI Best Attempt:** {msg['content']}")
                 
-                st.markdown(f"👉 **Help improve answer for:** *{msg.get('query', 'your question')}*")
+                st.markdown(f"👉 **What should AI focus on?** *(for: '{msg.get('query', 'your question')}')* ")
                 
                 q_lower = msg.get("query", "").lower()
                 suggestions = []
                 if "compare" in q_lower:
-                    suggestions = ["Compare using available data", "Highlight differences clearly"]
+                    suggestions = ["Compare clearly with differences"]
                 elif "explain" in q_lower:
-                    suggestions = ["Explain in simple terms", "Give detailed explanation"]
-                elif "what" in q_lower or "list" in q_lower:
-                    suggestions = ["List all relevant points", "Provide structured answer"]
+                    suggestions = ["Explain step-by-step"]
+                elif "process" in q_lower:
+                    suggestions = ["Give structured steps"]
                 else:
-                    suggestions = ["Use general knowledge", "Answer step-by-step"]
+                    suggestions = ["Answer step-by-step", "Provide structured summary"]
                 
                 cols = st.columns(len(suggestions))
                 for i, sugg in enumerate(suggestions):
@@ -218,8 +221,21 @@ for idx, msg in enumerate(st.session_state.messages):
                 instruction = msg.get("instruction") if "instruction" in msg else msg.get("meta", {}).get("hitl", False)
                 chunks = msg.get("chunks") if "chunks" in msg else msg.get("meta", {}).get("chunks", [])
                 
-                conf_cls = "confidence-high" if is_confident else "confidence-low"
-                conf_label = "High" if is_confident else "Low"
+                conf_level = msg.get("confidence_level")
+                if conf_level:
+                    if conf_level == "HIGH":
+                        conf_cls = "confidence-high"
+                        conf_label = "High (relevant match)"
+                    elif conf_level == "MEDIUM":
+                        conf_cls = "confidence-medium"
+                        conf_label = "Medium (partial match)"
+                    else:
+                        conf_cls = "confidence-low"
+                        conf_label = "Low (weak or no match)"
+                else:
+                    conf_cls = "confidence-high" if is_confident else "confidence-low"
+                    conf_label = "High" if is_confident else "Low"
+                    
                 hitl_badge = '<span class="hitl-badge">HITL Triggered</span>' if instruction else ""
                 
                 st.markdown(
@@ -266,9 +282,11 @@ if prompt := st.chat_input("Ask a question about HR, Leave policies, or IT issue
             "query": prompt,
             "confidence": avg_score,
             "hitl_needed": hitl_needed,
+            "hitl_reason": result.get("hitl_reason", "Low confidence answer"),
             "instruction": "",
             "chunks": contexts,
-            "is_confident": is_confident
+            "is_confident": is_confident,
+            "confidence_level": result.get("confidence_level", "LOW")
         }
         
         st.session_state.messages.append(assistant_msg)

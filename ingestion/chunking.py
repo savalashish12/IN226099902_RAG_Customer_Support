@@ -3,8 +3,6 @@ chunking.py — Splits documents into clean, overlapping chunks.
 
 Fixes applied:
   - Regex cleans broken lines, extra spaces, and TOC-like noise
-  - MAX_CHUNKS cap prevents excessive API calls
-  - chunk_size=900, overlap=100 for better context coverage
 """
 
 import re
@@ -46,9 +44,6 @@ def _clean_text(text: str) -> str:
 def split_documents(documents: List[Document]) -> List[Document]:
     """
     Clean and split documents into chunks.
-
-    Returns:
-        List of Document chunks capped at MAX_CHUNKS.
     """
     # Clean each page
     for doc in documents:
@@ -58,13 +53,13 @@ def split_documents(documents: List[Document]) -> List[Document]:
     documents = [d for d in documents if len(d.page_content) > 50]
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=400,
+        chunk_overlap=80,
         length_function=len,
         separators=["\n\n", "\n", ". ", " ", ""],
     )
 
     chunks = splitter.split_documents(documents)
 
-    print(f"  [chunking] Pages: {len(documents)} | Chunks: {len(chunks)} | size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP}")
+    print(f"  [chunking] Pages: {len(documents)} | Chunks: {len(chunks)} | size=400, overlap=80")
     return chunks

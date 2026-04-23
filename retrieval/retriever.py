@@ -44,17 +44,23 @@ def retrieve_context_with_scores(
 
     vs = _get_vectorstore(collection_name)
     
-    # 1. Use MMR search to ensure diversity
-    mmr_docs = vs.max_marginal_relevance_search(query, k=top_k, fetch_k=20)
+    # 1. Use MMR search to ensure diversity via as_retriever
+    retriever = vs.as_retriever(
+        search_type="mmr",
+        search_kwargs={
+            "k": 3,
+            "fetch_k": 15
+        }
+    )
+    mmr_docs = retriever.invoke(query)
     
     # 2. Fetch scores using standard search to map to MMR docs
     # Chroma returns L2 distances by default
-    all_results = vs.similarity_search_with_score(query, k=20)
+    all_results = vs.similarity_search_with_score(query, k=15)
     score_map = {}
     for doc, distance in all_results:
-        # Convert L2 distance to Similarity Score (higher is better)
-        similarity = 1.0 - (distance / 2.0)
-        score_map[doc.page_content] = similarity
+        # Use raw L2 distance (lower is better)
+        score_map[doc.page_content] = distance
 
     output = []
     for doc in mmr_docs:
