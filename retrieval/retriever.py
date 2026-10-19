@@ -4,11 +4,12 @@ retriever.py — Retrieves top-k chunks with scores and metadata from a named Ch
 
 import os
 import sys
-from typing import List, Tuple, Dict
+from typing import Dict, List, Tuple
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from langchain_chroma import Chroma
+
 from app.config import CHROMA_DB_PATH, TOP_K
 from ingestion.embedding import get_embedding_function
 
@@ -24,8 +25,6 @@ def _get_vectorstore(collection_name: str) -> Chroma:
             embedding_function=embedding_fn,
             persist_directory=CHROMA_DB_PATH,
         )
-        count = vs._collection.count()
-        print(f"  [retriever] Loaded '{collection_name}' — {count} chunks")
         _cache[collection_name] = vs
     return _cache[collection_name]
 
@@ -43,7 +42,7 @@ def retrieve_context_with_scores(
         raise ValueError("Query cannot be empty.")
 
     vs = _get_vectorstore(collection_name)
-    
+
     # 1. Use MMR search to ensure diversity via as_retriever
     retriever = vs.as_retriever(
         search_type="mmr",
@@ -53,7 +52,7 @@ def retrieve_context_with_scores(
         }
     )
     mmr_docs = retriever.invoke(query)
-    
+
     # 2. Fetch scores using standard search to map to MMR docs
     # Chroma returns L2 distances by default
     all_results = vs.similarity_search_with_score(query, k=15)
@@ -68,3 +67,51 @@ def retrieve_context_with_scores(
         output.append((doc.page_content, round(sim, 4), doc.metadata))
 
     return output
+
+
+def retrieve_multi_context_with_scores(
+    query: str,
+    collection_names: List[str],
+    top_k: int = TOP_K,
+) -> List[Tuple[str, float, dict]]:
+    """
+    Search across MULTIPLE collections and merge results.
+
+    Each collection is searched via MMR; results from all collections are
+    combined, sorted by L2 distance (lower = more relevant), and the
+    globally best top_k chunks are returned. Metadata is enriched with the
+    originating collection name so the answer can cite its source.
+
+    A single-collection input transparently falls back to standard retrieval.
+    """
+    if not query.strip():
+        raise ValueError("Query cannot be empty.")
+
+    if not collection_names:
+        return []
+
+    if len(collection_names) == 1:
+        return retrieve_context_with_scores(query, collection_names[0], top_k)
+
+    merged: List[Tuple[str, float, dict]] = []
+    for name in collection_names:
+        try:
+            results = retrieve_context_with_scores(query, name, top_k)
+        except Exception:
+            continue
+        for text, score, meta in results:
+            meta = dict(meta or {})
+            meta.setdefault("collection", name)
+            merged.append((text, score, meta))
+
+    # Deduplicate identical chunk text (same doc may appear in multiple collections)
+    seen = set()
+    deduped = []
+    for text, score, meta in merged:
+        if text in seen:
+            continue
+        seen.add(text)
+        deduped.append((text, score, meta))
+
+    deduped.sort(key=lambda x: x[1])
+    return deduped[:top_k]

@@ -8,11 +8,16 @@ import time
 from typing import List
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from app.config import GEMINI_API_KEY, EMBEDDING_MODEL, EMBEDDING_BATCH_SIZE, EMBEDDING_DELAY_SECONDS
-
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_core.embeddings import Embeddings
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from app.config import (
+    EMBEDDING_BATCH_SIZE,
+    EMBEDDING_DELAY_SECONDS,
+    EMBEDDING_MODEL,
+    GEMINI_API_KEY,
+)
 
 
 class RateLimitedEmbeddings(Embeddings):
@@ -38,11 +43,9 @@ class RateLimitedEmbeddings(Embeddings):
         for idx in range(0, len(texts), self.batch_size):
             batch     = texts[idx : idx + self.batch_size]
             batch_num = idx // self.batch_size + 1
-            print(f"  [embedding] Batch {batch_num}/{total} ({len(batch)} items)...")
             results.extend(self._embed_batch(batch))
 
             if idx + self.batch_size < len(texts):
-                print(f"  [embedding] Waiting {self.delay}s...")
                 time.sleep(self.delay)
 
         return results
@@ -66,5 +69,5 @@ def get_embedding_function() -> Embeddings:
         task_type="retrieval_document",
     )
 
-    print(f"  [embedding] Initialized (batch={EMBEDDING_BATCH_SIZE}, delay={EMBEDDING_DELAY_SECONDS}s)")
+    # Quiet startup log
     return RateLimitedEmbeddings(base, EMBEDDING_BATCH_SIZE, EMBEDDING_DELAY_SECONDS)

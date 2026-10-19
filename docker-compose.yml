@@ -1,0 +1,13 @@
+services:
+  ragsupport:
+    build: .
+    image: technova-rag-support:latest
+    container_name: technova-rag-support
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      # Persist vector store + SQLite across restarts
+      - ./chroma_db:/app/chroma_db
+    restart: unless-stopped

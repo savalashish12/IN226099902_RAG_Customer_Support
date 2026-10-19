@@ -2,16 +2,24 @@
 config.py — Central configuration loaded from .env
 """
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Debug / verbose logging (set RAG_DEBUG=1 to see pipeline prints)
+RAG_DEBUG = os.getenv("RAG_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on")
+
+# Optional integrations
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+APP_PASSWORD      = os.getenv("APP_PASSWORD", "").strip()
 
 # API Keys
 GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")
 GROQ_API_KEY    = os.getenv("GROQ_API_KEY", "")
 
 # LLM
-GROQ_MODEL      = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL      = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # ChromaDB
 CHROMA_DB_PATH  = os.getenv("CHROMA_DB_PATH", "./chroma_db")

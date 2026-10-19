@@ -3,6 +3,7 @@ state.py — LangGraph shared state for RAG pipeline.
 All nodes read from and write to this TypedDict.
 """
 from typing import List, Optional
+
 from typing_extensions import TypedDict
 
 
@@ -10,6 +11,9 @@ class RAGState(TypedDict):
     # ── Input ─────────────────────────────────────────────────
     query            : str              # User's question
     collection_name  : str              # ChromaDB collection (doc_<md5>)
+    collection_names : List[str]        # Multiple collections to search (unified KB)
+    chat_history     : List[dict]       # Prior turns: [{role, content}]
+    standalone_query : str              # Context-resolved query used for retrieval
 
     # ── Retrieval Output ──────────────────────────────────────
     context          : List[str]        # Retrieved chunk texts

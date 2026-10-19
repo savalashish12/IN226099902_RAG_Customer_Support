@@ -1,0 +1,36 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Local data & secrets
+.env
+chroma_db/
+*.db
+*.db-wal
+*.db-shm
+assistant.db
+
+# Docs & submission artifacts
+submission/
+*.docx
+
+# Tests & caches
+test/__pycache__/
+.streamlit/
+
+# OS
+.DS_Store
+Thumbs.db

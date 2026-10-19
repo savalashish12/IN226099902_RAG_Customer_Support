@@ -5,17 +5,16 @@ Fixes applied:
   - Regex cleans broken lines, extra spaces, and TOC-like noise
 """
 
-import re
 import os
+import re
 import sys
 from typing import List
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-from app.config import CHUNK_SIZE, CHUNK_OVERLAP
-
+from app.config import CHUNK_OVERLAP, CHUNK_SIZE
 
 # Patterns that indicate noisy / low-value content (TOC lines, page markers)
 _NOISE_PATTERNS = [
@@ -61,5 +60,4 @@ def split_documents(documents: List[Document]) -> List[Document]:
 
     chunks = splitter.split_documents(documents)
 
-    print(f"  [chunking] Pages: {len(documents)} | Chunks: {len(chunks)} | size=400, overlap=80")
     return chunks

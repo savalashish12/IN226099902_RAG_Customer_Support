@@ -6,14 +6,42 @@ IMPORTANT HITL DESIGN:
   - Graph resumes via Command(resume={...}) from Streamlit UI
   - MemorySaver checkpointer saves state between pause and resume
 """
-import os, sys
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from langgraph.types import interrupt
-from app.config import HIGH_CONF_THRESHOLD, MEDIUM_CONF_THRESHOLD
-from retrieval.retriever import retrieve_context_with_scores
-from llm.groq_client import generate_answer
+
+from app.config import HIGH_CONF_THRESHOLD, MEDIUM_CONF_THRESHOLD, RAG_DEBUG
 from graph.state import RAGState
+from llm.groq_client import generate_answer
+from llm.query_rewriter import rewrite_query
+from retrieval.retriever import retrieve_context_with_scores, retrieve_multi_context_with_scores
+
+
+def _log(*args):
+    """Verbose pipeline logging, enabled only when RAG_DEBUG=1."""
+    if RAG_DEBUG:
+        print(*args)
+
+
+# ═══════════════════════════════════════════════════════════════
+# NODE 0: QUERY REWRITE (conversational memory)
+# ═══════════════════════════════════════════════════════════════
+def rewrite_node(state: RAGState) -> dict:
+    """
+    Resolves context-dependent follow-up questions into standalone queries
+    using recent chat history. Retrieval then uses `standalone_query`.
+    """
+    query   = state["query"]
+    history = state.get("chat_history", []) or []
+
+    standalone = rewrite_query(query, history)
+    if standalone != query:
+        _log(f"[rewrite] '{query}' -> '{standalone}'")
+
+    return {"standalone_query": standalone}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -25,18 +53,21 @@ def retrieval_node(state: RAGState) -> dict:
     Uses MMR (Maximal Marginal Relevance) for diversity.
     Returns chunks with L2 distance scores (lower = more relevant).
     """
-    query           = state["query"]
-    collection_name = state["collection_name"]
+    query            = state.get("standalone_query") or state["query"]
+    collection_name  = state.get("collection_name", "")
+    collection_names = state.get("collection_names", []) or (
+        [collection_name] if collection_name else []
+    )
 
-    print(f"\n[retrieval] Query: '{query}' | Collection: {collection_name}")
+    _log(f"[retrieval] Query: '{query}' | Collections: {collection_names}")
 
-    results = retrieve_context_with_scores(query, collection_name=collection_name)
+    results = retrieve_multi_context_with_scores(query, collection_names=collection_names)
 
     context = [text     for text, score, meta in results]
     scores  = [score    for text, score, meta in results]
     sources = [meta     for text, score, meta in results]
 
-    print(f"[retrieval] {len(context)} chunks | Scores: {[round(s,3) for s in scores]}")
+    _log(f"[retrieval] {len(context)} chunks | Scores: {[round(s,3) for s in scores]}")
 
     return {"context": context, "scores": scores, "sources": sources}
 
@@ -47,7 +78,7 @@ def retrieval_node(state: RAGState) -> dict:
 def generation_node(state: RAGState) -> dict:
     """
     Calls Groq LLM with retrieved context to generate an answer.
-    
+
     NO-ANSWER GUARD: If avg score is very high (> MEDIUM threshold),
     the chunks are too dissimilar — skip LLM and return a standard
     "not found" response. This prevents hallucination.
@@ -55,21 +86,22 @@ def generation_node(state: RAGState) -> dict:
     query       = state["query"]
     context     = state["context"]
     scores      = state.get("scores", [])
+    sources     = state.get("sources", [])
     instruction = state.get("hitl_instruction", "")
 
     avg_score = sum(scores) / len(scores) if scores else 1.0
 
     # No-Answer Guard — chunks too dissimilar, don't call LLM
     if avg_score >= MEDIUM_CONF_THRESHOLD:
-        print(f"[generation] No-Answer Guard | avg_score={avg_score:.4f} >= {MEDIUM_CONF_THRESHOLD}")
+        _log(f"[generation] No-Answer Guard | avg_score={avg_score:.4f} >= {MEDIUM_CONF_THRESHOLD}")
         return {
             "answer": "I could not find relevant information in the provided documents.",
             "avg_score": avg_score,
         }
 
-    print(f"[generation] avg_score={avg_score:.4f} — calling LLM...")
-    answer = generate_answer(query, context, instruction)
-    print(f"[generation] Answer (preview): {answer[:120]}...")
+    _log(f"[generation] avg_score={avg_score:.4f} — calling LLM...")
+    answer = generate_answer(query, context, instruction, sources)
+    _log(f"[generation] Answer (preview): {answer[:120]}...")
 
     return {"answer": answer, "avg_score": avg_score}
 
@@ -80,9 +112,9 @@ def generation_node(state: RAGState) -> dict:
 def _classify_confidence(avg_score: float, answer: str) -> tuple[str, bool, bool, str]:
     """
     Maps avg L2 distance → confidence label, HITL decision.
-    
+
     Returns: (confidence_level, is_confident, hitl_needed, hitl_reason)
-    
+
     L2 Distance Logic (ChromaDB default metric):
       0.00 – 0.30 → HIGH   → Direct document match → No HITL
       0.30 – 0.55 → MEDIUM → Partial match         → HITL only if complex
@@ -107,7 +139,7 @@ def _classify_confidence(avg_score: float, answer: str) -> tuple[str, bool, bool
 def evaluation_node(state: RAGState) -> dict:
     """
     Evaluates retrieval quality and decides whether to trigger HITL.
-    
+
     HITL Escalation Criteria:
       1. LOW confidence  → always escalate
       2. MEDIUM + query has urgent/error keywords → escalate
@@ -137,8 +169,8 @@ def evaluation_node(state: RAGState) -> dict:
             hitl_needed = True
             hitl_reason = "Complex multi-part query"
 
-    print(
-        f"\n[evaluation] avg={avg_score:.4f} | similarity={similarity_pct}% "
+    _log(
+        f"[evaluation] avg={avg_score:.4f} | similarity={similarity_pct}% "
         f"| confidence={confidence_level} | hitl={hitl_needed} | reason={hitl_reason}"
     )
 
@@ -158,7 +190,7 @@ def evaluation_node(state: RAGState) -> dict:
 def hitl_node(state: RAGState) -> dict:
     """
     REAL LangGraph HITL using interrupt().
-    
+
     HOW IT WORKS:
       1. Graph execution PAUSES here via interrupt()
       2. The interrupt payload is sent to the Streamlit UI
@@ -166,11 +198,11 @@ def hitl_node(state: RAGState) -> dict:
       4. Human reviews and submits → UI calls graph.invoke(Command(resume={...}))
       5. Graph RESUMES from this exact point with the human's input
       6. Returns updated answer to the user
-    
+
     The MemorySaver checkpointer saves the full graph state between
     pause and resume, identified by thread_id in the config.
     """
-    print("[hitl] ⏸️  Graph paused — waiting for human review...")
+    _log("[hitl] Graph paused — waiting for human review...")
 
     # PAUSE EXECUTION — sends payload to Streamlit UI
     human_input = interrupt({
@@ -183,7 +215,7 @@ def hitl_node(state: RAGState) -> dict:
     })
 
     # RESUMES HERE after Command(resume={...}) is called
-    print(f"[hitl] ▶️  Resumed with human input: {str(human_input)[:80]}...")
+    _log(f"[hitl] Resumed with human input: {str(human_input)[:80]}...")
 
     # Human can: approve AI answer, provide corrected answer, or add instructions
     approved_answer = human_input.get("approved_answer", state["answer"])

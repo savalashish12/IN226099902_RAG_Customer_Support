@@ -1,10 +1,13 @@
 """
 vector_store.py — ChromaDB CRUD operations.
 """
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from langchain_chroma import Chroma
+
 from app.config import CHROMA_DB_PATH
 from ingestion.embedding import get_embedding_function
 

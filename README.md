@@ -226,3 +226,70 @@ TOP_K=5
 ---
 
 *TechNova Internal Support Assistant · Stack: Gemini + Groq + ChromaDB + LangGraph + Streamlit*
+
+
+
+NEW IMPLEMENTATION PLAN
+
+Implementation Plan: RAG Support Assistant — Full Upgrade
+Current Architecture (verified)
+- Single-PDF upload → doc_<md5> collections → query hits one active collection
+- Ingestion is synchronous (blocks Streamlit UI)
+- HITL log is in-memory (lost on restart); no chat persistence, no feedback, no analytics
+- sources metadata (incl. page from PyPDFLoader) is captured in state but never shown to the user
+- No conversational memory — every query is standalone
+Phase 1 — Batch Upload (multi-file + folder path + ZIP)
+Files: app/streamlit_app.py, new ingestion/batch.py
+- Sidebar upload UI with a mode selector: 📄 Files (multi-select) | 📁 Local folder path | 📦 ZIP archive
+- Multi-file: st.file_uploader(accept_multiple_files=True)
+- Folder: text input → os.walk() discovers all .pdf (path validation + friendly errors)
+- ZIP: zipfile stdlib extraction, filter .pdf entries, skip macOS junk paths
+- New ingestion/batch.py:
+- discover_pdfs_in_folder(path), extract_pdfs_from_zip(zip_bytes)
+- ingest_batch(items: list[(name, bytes)]) — per-file MD5 dedup (existing logic), returns status records {name, status: cached|ingested|failed, chunks, error}
+- Sidebar ingestion status panel: per-file ✅/♻️/❌ with chunk counts; auto-selects first ingested doc
+Phase 2 — Unified Multi-Document Search + Citations
+Files: retrieval/retriever.py, graph/state.py, graph/nodes.py, llm/prompt_template.py, app/streamlit_app.py
+- retrieve_multi(query, collection_names, top_k) — MMR per collection → merge → sort by L2 → top-k (cross-collection score map like the existing one at retriever.py:59)
+- State: collection_name: str → collection_names: List[str]; retrieval node iterates
+- Prompt builder tags each chunk [Source: filename.pdf | page N] and instructs the LLM to cite sources in the answer
+- UI: sidebar toggle "Search all documents" (default ON) vs specific doc; answers render citation chips + chunk viewer shows file + page
+Phase 3 — Conversational Memory
+Files: new llm/query_rewriter.py, graph/state.py, graph/nodes.py, graph/workflow.py, app/streamlit_app.py
+- New rewrite node in the graph: START → rewrite → retrieval → generation → evaluation → (hitl) → END
+- Rewriter takes last 4–6 chat turns + current query → standalone query via Groq (cheap, temp=0)
+- Skipped when first message or query is already self-contained (heuristic: long enough / no pronouns — simple LLM classification or always-rewrite when history exists)
+- State gains chat_history + standalone_query; UI passes history into run_rag_pipeline
+Phase 4 — SQLite Persistence + Feedback Loop
+Files: new db/database.py, refactor hitl/manager.py, app/streamlit_app.py
+- db/database.py (stdlib sqlite3, WAL mode, auto-migrate on startup) — tables:
+- messages (session_id, role, content, confidence, similarity, sources JSON)
+- escalations (thread_id, query, ai_answer, confidence, reason, status, final_answer, timestamps) — HITLManager rewritten to persist here instead of the in-memory dict
+- feedback (message_id, rating 👍/👎, comment, timestamp)
+- Every assistant answer gets 👍/👎 buttons → feedback row (comment box on 👎)
+- Chat history restored per session on reload; "Clear chat" button
+- Knowledge-gap query: low-confidence + negative-feedback queries aggregated (used by Phase 5 dashboard)
+Phase 5 — Async Ingestion + Live Progress
+Files: new ingestion/worker.py, app/streamlit_app.py
+- Background threading.Thread per batch; worker updates a thread-safe status dict in st.session_state
+- Progress UI auto-refreshes via st.fragment(run_every=1.5s) — shows live per-file status + overall progress bar; UI stays interactive during 10-PDF ingestion
+- Dedup check happens instantly (before thread) so cached files resolve immediately
+Phase 6 — Admin Analytics Dashboard
+Files: new app/pages/1_💬_Assistant.py, app/pages/2_📊_Analytics.py (Streamlit multipage)
+- Move existing chat UI into page 1; new analytics page 2:
+- KPI cards: total queries, escalation rate, avg confidence, documents ingested, feedback score
+- Charts (native st.* charts, no new deps): queries/day, confidence distribution, top escalated queries, most-asked topics, per-document usage
+- Knowledge-gap table from Phase 4 ( unanswered + 👎 queries → suggests docs HR should publish)
+- Escalation log browser with filters
+Phase 7 — Enterprise Boosters
+- Streaming answers: Groq client gains stream_answer() → st.write_stream token-by-token (big demo impact)
+- Slack escalation webhook: hitl/notifier.py — fire-and-forget POST on new escalation if SLACK_WEBHOOK_URL set (env-optional, no crash if absent)
+- Docker: Dockerfile + docker-compose.yml (app + volume for chroma_db/ + .env) + .dockerignore
+- CI: .github/workflows/ci.yml — lint (ruff) + existing tests on push
+- RAG eval harness: test/eval_golden_set.json (~15 Q→expected-doc pairs) + test/test_eval.py scoring retrieval hit-rate + answer containment; run via pytest
+- Lightweight auth: optional APP_PASSWORD env gate + role (employee/admin) — admin sees Analytics page; skipped gracefully if env unset
+- Hybrid search (stretch): BM25 (rank_bm25) + vector fusion via RRF in the retriever — only if time permits, behind a config flag
+Execution Order & Notes
+1 → 2 → 3 → 4 → 5 → 6 → 7 (each phase leaves the app working; Phase 2 is the biggest impact and touches the core pipeline)
+Dependencies: no new packages required for Phases 1–6 (sqlite3/zipfile/threading are stdlib, charts are native Streamlit). Phase 7 optionally adds nothing beyond requirements.txt additions only if hybrid search is included.
+Risks handled: Streamlit threading needs session-state isolation (handled via fragment polling); changing collection_name → collection_names ripples through run_rag_pipeline signature (update test/test_graph.py accordingly); MemorySaver HITL resume must keep working across the new rewrite node (resume semantics unchanged — interrupt stays in hitl_node).

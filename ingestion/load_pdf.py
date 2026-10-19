@@ -2,24 +2,28 @@
 load_pdf.py — Loads a PDF from bytes, chunks it, embeds it, stores in ChromaDB.
 Uses MD5 hash for deduplication — same file never re-embedded.
 """
-import sys, os
+import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tempfile
+
 from langchain_community.document_loaders import PyPDFLoader
+
 from ingestion.chunking import split_documents
-from ingestion.vector_store import store_chunks, collection_exists
+from ingestion.vector_store import collection_exists, store_chunks
 
 
 def load_and_ingest_pdf(file_bytes: bytes, collection_name: str, filename: str = "document.pdf") -> int:
     """
     Load PDF bytes → chunk → embed → store in ChromaDB.
-    
+
     Args:
         file_bytes: Raw PDF bytes from Streamlit uploader
         collection_name: Target ChromaDB collection (doc_<md5>)
         filename: Original filename for metadata
-    
+
     Returns:
         Number of chunks stored
     """
