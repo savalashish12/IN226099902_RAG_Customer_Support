@@ -23,6 +23,12 @@ st.set_page_config(page_title="Analytics · TechNova", page_icon="📊", layout=
 
 db.init_db()
 
+# Admin gate — hide page if not admin (when auth is enabled)
+from app.config import APP_PASSWORD, ADMIN_PASSWORD
+if APP_PASSWORD and ADMIN_PASSWORD and not st.session_state.get("is_admin"):
+    st.warning("🔒 Admin access required. Sign in with the admin password in the main app.")
+    st.stop()
+
 st.markdown("# 📊 Support Analytics")
 st.caption("Operational insight into the RAG assistant's usage, quality, and knowledge gaps.")
 

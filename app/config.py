@@ -13,6 +13,7 @@ RAG_DEBUG = os.getenv("RAG_DEBUG", "0").strip().lower() in ("1", "true", "yes", 
 # Optional integrations
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "").strip()
 APP_PASSWORD      = os.getenv("APP_PASSWORD", "").strip()
+ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "").strip()
 
 # API Keys
 GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")

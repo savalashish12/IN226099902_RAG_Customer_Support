@@ -54,6 +54,41 @@ from llm.groq_client import stream_answer
 db.init_db()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LIGHTWEIGHT AUTH GATE (optional — enabled by APP_PASSWORD env)
+# ─────────────────────────────────────────────────────────────────────────────
+def check_auth() -> bool:
+    """
+    Returns True if access is granted. If APP_PASSWORD is set in .env,
+    shows a password prompt and gates the app. Sets st.session_state["is_admin"]
+    when the password matches the optional ADMIN_PASSWORD env.
+    """
+    from app.config import APP_PASSWORD
+    if not APP_PASSWORD:
+        return True  # no password configured → open access
+
+    if st.session_state.get("_auth_ok"):
+        return True
+
+    with st.sidebar:
+        st.markdown("### 🔐 Authentication Required")
+        pwd = st.text_input("App password", type="password", key="auth_pwd")
+        if st.button("Sign in", use_container_width=True):
+            if pwd == APP_PASSWORD:
+                st.session_state["_auth_ok"] = True
+                # Admin role if ADMIN_PASSWORD matches (optional separate secret)
+                from app.config import APP_PASSWORD as admin_pw
+                if admin_pw and pwd == admin_pw:
+                    st.session_state["is_admin"] = True
+                st.rerun()
+            else:
+                st.error("Invalid password")
+    st.stop()
+
+
+check_auth()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SESSION STATE INIT
 # ─────────────────────────────────────────────────────────────────────────────
 def init_session():
